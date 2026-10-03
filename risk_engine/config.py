@@ -52,6 +52,10 @@ class RiskConfig:
     thresholds: Thresholds = field(default_factory=Thresholds)
     window_rules: tuple[WindowRuleConfig, ...] = ()
     late_tolerance_seconds: int = 3600
+    # 同一 (规则, 维度键) 两次告警的最小间隔；冷却期内的越限事件被抑制不刷屏
+    alert_cooldown_seconds: int = 900
+    # 告警保留时长（相对水位线），超出的历史告警从活动列表中剪枝，控制内存
+    alert_retention_seconds: int = 86400
     weights: dict[str, float] = field(default_factory=dict)
     rule_names: dict[str, str] = field(default_factory=dict)
 

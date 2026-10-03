@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+from . import persistence
 from .cases import CaseService
 from .config import RiskConfig, default_config
 from .models import (
@@ -16,6 +17,8 @@ from .models import (
     CaseStatus,
     DispositionResult,
     EventIngestResult,
+    ExportResult,
+    ImportResult,
     RejectResult,
     RiskEvent,
     Role,
@@ -98,3 +101,30 @@ class RiskEngine:
         reason: str,
     ) -> DispositionResult:
         return self._cases.dispose(case_id, actor, role, to_status, reason)
+
+    def reopen_case(
+        self,
+        case_id: str,
+        actor: str,
+        role: Role,
+        reason: str,
+    ) -> DispositionResult:
+        """申诉重开终态案件；不修改建案快照与历史依据。"""
+        return self._cases.reopen(case_id, actor, role, reason)
+
+    # ---------- 状态导出 / 导入 ----------
+
+    def _replace_state(
+        self, behavior: SuspiciousBehaviorService, cases: CaseService
+    ) -> None:
+        """整体替换运行状态（仅 persistence 在完整校验通过后调用）。"""
+        self._behavior = behavior
+        self._cases = cases
+
+    def export_state(self, path: str) -> ExportResult:
+        """导出当前运行状态到本地文件（含规则版本）。"""
+        return persistence.export_state(self, path)
+
+    def import_state(self, path: str) -> ImportResult:
+        """从本地文件恢复状态；版本/语义不兼容时明确拒绝，当前状态不变。"""
+        return persistence.import_state(self, path)

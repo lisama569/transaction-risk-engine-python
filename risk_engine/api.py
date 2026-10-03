@@ -69,6 +69,16 @@ class DispositionIn(BaseModel):
     reason: str = ""
 
 
+class ReopenIn(BaseModel):
+    actor: str
+    role: Role
+    reason: str = ""
+
+
+class StatePathIn(BaseModel):
+    path: str = Field(min_length=1)
+
+
 def _to_transaction(payload: TransactionIn) -> Transaction:
     return Transaction(
         transaction_id=payload.transaction_id,
@@ -176,6 +186,8 @@ def create_app(engine: RiskEngine | None = None) -> FastAPI:
             "accepted": result.accepted,
             "deduped": result.deduped,
             "late_dropped": result.late_dropped,
+            "reject_reason": result.reject_reason or None,
+            "reject_detail": result.reject_detail or None,
             "alerts": [_alert_out(a) for a in result.alerts],
         }
 
@@ -228,5 +240,33 @@ def create_app(engine: RiskEngine | None = None) -> FastAPI:
                 case_id, payload.actor, payload.role, payload.to_status, payload.reason
             )
         )
+
+    @app.post("/cases/{case_id}/reopen")
+    def reopen_case(case_id: str, payload: ReopenIn) -> dict[str, Any]:
+        return _disposition_out(
+            engine.reopen_case(case_id, payload.actor, payload.role, payload.reason)
+        )
+
+    @app.post("/state/export")
+    def export_state(payload: StatePathIn) -> dict[str, Any]:
+        result = engine.export_state(payload.path)
+        return {
+            "ok": result.ok,
+            "path": result.path,
+            "reason_code": result.reason_code,
+            "detail": result.detail,
+            "rule_version": result.rule_version,
+        }
+
+    @app.post("/state/import")
+    def import_state(payload: StatePathIn) -> dict[str, Any]:
+        result = engine.import_state(payload.path)
+        return {
+            "ok": result.ok,
+            "path": payload.path,
+            "reason_code": result.reason_code,
+            "detail": result.detail,
+            "rule_version": result.rule_version,
+        }
 
     return app

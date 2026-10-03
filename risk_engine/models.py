@@ -120,15 +120,52 @@ class Alert:
     rule_version: str
 
 
+def alert_to_dict(alert: Alert) -> dict:
+    """告警 -> 可 JSON 序列化字典（供状态导出）。"""
+    return {
+        "dimension": alert.dimension,
+        "key": alert.key,
+        "rule_id": alert.rule_id,
+        "triggered_event_id": alert.triggered_event_id,
+        "window_start": alert.window_start.isoformat(),
+        "window_end": alert.window_end.isoformat(),
+        "count": alert.count,
+        "event_ids": list(alert.event_ids),
+        "rule_version": alert.rule_version,
+    }
+
+
+def alert_from_dict(data: dict) -> Alert:
+    """从字典还原告警；字段缺失/类型不符抛 ValueError（由调用方转成结构化拒绝）。"""
+    try:
+        return Alert(
+            dimension=str(data["dimension"]),
+            key=str(data["key"]),
+            rule_id=str(data["rule_id"]),
+            triggered_event_id=str(data["triggered_event_id"]),
+            window_start=datetime.fromisoformat(data["window_start"]),
+            window_end=datetime.fromisoformat(data["window_end"]),
+            count=int(data["count"]),
+            event_ids=[str(e) for e in data["event_ids"]],
+            rule_version=str(data["rule_version"]),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"告警记录无法解析: {exc}") from exc
+
+
 @dataclass
 class EventIngestResult:
-    """事件上报结果：区分接收、迟到丢弃与重复去重。"""
+    """事件上报结果：区分接收、迟到丢弃、重复去重与结构化拒绝。"""
 
     event_id: str
     accepted: bool
     deduped: bool
     late_dropped: bool
     alerts: list[Alert] = field(default_factory=list)
+    # 输入本身无法处理时的可区分拒绝原因（空表示未被拒绝）：
+    # missing_field / invalid_time
+    reject_reason: str = ""
+    reject_detail: str = ""
 
 
 @dataclass(frozen=True)
@@ -175,6 +212,28 @@ class DispositionResult:
     applied: bool
     idempotent_replay: bool
     status: CaseStatus
-    reason_code: str  # ok / duplicate / concurrent_conflict / forbidden / not_found / invalid_transition
+    reason_code: str  # ok / duplicate / concurrent_conflict / forbidden / not_found / invalid_transition / missing_reason
     detail: str
     rule_version: str = ""
+
+
+@dataclass
+class ExportResult:
+    """状态导出结果。"""
+
+    ok: bool
+    path: str
+    reason_code: str  # ok / io_error
+    detail: str
+    rule_version: str = ""
+
+
+@dataclass
+class ImportResult:
+    """状态导入结果；版本/语义不兼容时明确拒绝，不套用新规则。"""
+
+    ok: bool
+    path: str
+    reason_code: str  # ok / not_found / corrupt_file / schema_mismatch / version_mismatch
+    detail: str
+    rule_version: str = ""  # 文件中声明的规则版本
