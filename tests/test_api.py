@@ -117,12 +117,46 @@ def test_case_flow_permission_and_idempotency(client):
 
 def test_open_case_with_unscorable_tx_rejected(client):
     bad = dict(GOOD_TX, transaction_id="tbad", amount=-1.0)
-    # 经门面 open_case_for_transaction 会抛 ValueError -> FastAPI 返回 500，
-    # 而常规评分入口对该输入返回结构化拒绝原因（不静默通过）。
+    # 评分入口：结构化拒绝原因（不静默通过）
     score_resp = client.post("/risk/score", json=bad).json()
     assert score_resp["rejected"] is True
     assert score_resp["reject_reason"] == "invalid_amount"
-    log.info("非法交易评分拒绝: %s", score_resp)
+    # 开案入口：同样给结构化、可区分拒绝，不变服务异常
+    open_resp = client.post("/cases/cbad/open", json=bad)
+    assert open_resp.status_code == 200
+    body = open_resp.json()
+    assert body["opened"] is False and body["rejected"] is True
+    assert body["reject_reason"] == "invalid_amount"
+    assert client.get("/cases/cbad").json()["found"] is False
+    log.info("非法交易开案拒绝: %s", body)
+
+
+def test_reopen_over_http(client):
+    client.post("/cases/c1/open", json=GOOD_TX)
+    client.post("/cases/c1/dispose", json={
+        "actor": "mia", "role": "senior_analyst",
+        "to_status": "confirmed_fraud", "reason": "确认",
+    })
+    # analyst 无权重开
+    denied = client.post("/cases/c1/reopen", json={
+        "actor": "bob", "role": "analyst", "reason": "试试",
+    }).json()
+    assert denied["reason_code"] == "forbidden"
+    # admin 带原因重开成功
+    ok = client.post("/cases/c1/reopen", json={
+        "actor": "carol", "role": "admin", "reason": "申诉材料充分",
+    }).json()
+    assert ok["applied"] is True and ok["status"] == "open"
+    # 重复提交 -> 幂等回放，原因可区分
+    dup = client.post("/cases/c1/reopen", json={
+        "actor": "carol", "role": "admin", "reason": "申诉材料充分",
+    }).json()
+    assert dup["reason_code"] == "duplicate" and "申诉材料充分" in dup["detail"]
+    # 快照仍是受理时的版本与结论
+    detail = client.get("/cases/c1").json()
+    assert detail["snapshot"]["rule_version"] == "rules-v1"
+    assert len(detail["history"]) == 2
+    log.info("HTTP 重开: ok=%s dup=%s", ok, dup)
 
 
 def test_case_not_found(client):

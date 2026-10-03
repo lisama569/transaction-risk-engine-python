@@ -69,6 +69,16 @@ class DispositionIn(BaseModel):
     reason: str = ""
 
 
+class ReopenIn(BaseModel):
+    actor: str
+    role: Role
+    reason: str
+
+
+class StatePathIn(BaseModel):
+    path: str = Field(min_length=1)
+
+
 def _to_transaction(payload: TransactionIn) -> Transaction:
     return Transaction(
         transaction_id=payload.transaction_id,
@@ -121,6 +131,7 @@ def _alert_out(alert) -> dict[str, Any]:
         "count": alert.count,
         "event_ids": alert.event_ids,
         "rule_version": alert.rule_version,
+        "occurrence": alert.occurrence,
     }
 
 
@@ -185,8 +196,19 @@ def create_app(engine: RiskEngine | None = None) -> FastAPI:
 
     @app.post("/cases/{case_id}/open")
     def open_case(case_id: str, payload: TransactionIn) -> dict[str, Any]:
-        case = engine.open_case_for_transaction(case_id, _to_transaction(payload))
-        return {"case_id": case.case_id, "status": case.status.value}
+        tx = _to_transaction(payload)
+        scored = engine.score(tx)
+        if isinstance(scored, RejectResult):
+            # 无法评分的输入给结构化、可区分拒绝，不变服务异常
+            return {
+                "opened": False,
+                "case_id": case_id,
+                "rejected": True,
+                "reject_reason": scored.reject_reason.value,
+                "detail": scored.detail,
+            }
+        case = engine.open_case_for_transaction(case_id, tx)
+        return {"opened": True, "case_id": case.case_id, "status": case.status.value}
 
     @app.get("/cases/{case_id}")
     def get_case(case_id: str) -> dict[str, Any]:
@@ -228,5 +250,31 @@ def create_app(engine: RiskEngine | None = None) -> FastAPI:
                 case_id, payload.actor, payload.role, payload.to_status, payload.reason
             )
         )
+
+    @app.post("/cases/{case_id}/reopen")
+    def reopen_case(case_id: str, payload: ReopenIn) -> dict[str, Any]:
+        return _disposition_out(
+            engine.reopen_case(case_id, payload.actor, payload.role, payload.reason)
+        )
+
+    @app.post("/state/export")
+    def export_state(payload: StatePathIn) -> dict[str, Any]:
+        result = engine.export_state(payload.path)
+        return {
+            "ok": result.ok,
+            "path": result.path,
+            "rule_version": result.rule_version,
+            "detail": result.detail,
+        }
+
+    @app.post("/state/import")
+    def import_state(payload: StatePathIn) -> dict[str, Any]:
+        result = engine.import_state(payload.path)
+        return {
+            "ok": result.ok,
+            "reason_code": result.reason_code,
+            "rule_version": result.rule_version,
+            "detail": result.detail,
+        }
 
     return app

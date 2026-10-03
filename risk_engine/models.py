@@ -118,6 +118,7 @@ class Alert:
     count: int
     event_ids: list[str]
     rule_version: str
+    occurrence: int = 1  # 同一 (rule_id, key) 的第几次告警（冷却重报时递增）
 
 
 @dataclass

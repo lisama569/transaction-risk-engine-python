@@ -98,3 +98,42 @@ class RiskEngine:
         reason: str,
     ) -> DispositionResult:
         return self._cases.dispose(case_id, actor, role, to_status, reason)
+
+    def reopen_case(
+        self,
+        case_id: str,
+        actor: str,
+        role: Role,
+        reason: str,
+    ) -> DispositionResult:
+        """申诉重开：终态案件由有权限角色带原因重新打开。"""
+        return self._cases.reopen(case_id, actor, role, reason)
+
+    # ---- 状态快照导出 / 恢复 ----
+
+    def window_snapshot(self) -> dict:
+        return self._behavior.snapshot()
+
+    def cases_snapshot(self) -> dict:
+        return self._cases.snapshot()
+
+    def restore_window(self, data: dict) -> None:
+        """恢复到全新窗口服务再整体替换；解析失败时本引擎状态不受影响。"""
+        restored = SuspiciousBehaviorService(self._config)
+        restored.restore(data)
+        self._behavior = restored
+
+    def restore_cases(self, data: dict) -> None:
+        self._cases.restore(data)
+
+    def export_state(self, path: str):
+        """导出当前运行状态到本地文件（含规则版本）。"""
+        from .persistence import export_state
+
+        return export_state(self, path)
+
+    def import_state(self, path: str):
+        """从本地文件恢复状态；版本/结构不符时明确拒绝且引擎保持原样。"""
+        from .persistence import import_state
+
+        return import_state(path, self)
