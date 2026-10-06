@@ -57,6 +57,25 @@ uv run pytest                 # 运行全部测试（日志打印输入/命中�
 
 批量评分逐笔隔离：单笔被拒绝或抛异常只产生一条 `rejected` 记录，不影响其余交易出分。
 
+### 各入口的统一拒绝行为（同一输入、同一结论）
+
+同一笔拿不到结论的输入，无论从哪个对外入口提交，得到的拒绝类别与说明**完全一致**，
+且一律是 HTTP 200 + 结构化响应体（不会 500、不会静默放过）：
+
+| 入口 | 拒绝时的响应 |
+| --- | --- |
+| `POST /risk/score` | `{"rejected": true, "reject_reason": "...", "detail": "..."}` |
+| `POST /risk/score-batch` | 该笔进入 `rejected` 数组，字段同上；其余交易照常出分 |
+| `POST /events` | `{"accepted": false, "reject_reason": "missing_field"/"invalid_time", "reject_detail": "..."}` |
+| `POST /cases/{id}/open` | `{"opened": false, "rejected": true, "reject_reason": "...", "detail": "..."}`，与评分入口逐字一致 |
+
+保证：
+
+- **无副作用**：被拒绝的开案请求不会生成案件，也不改动任何既有案件的状态、快照与历史；
+- **重复/并发稳定**：同一坏输入重复提交或并发提交，每次响应完全一致，不会出现
+  "一会儿拒绝、一会儿建了案"（开案前先评分，校验是纯函数，拒绝发生在任何状态写入之前）；
+- 开案成功时响应为 `{"opened": true, "rejected": false, "status": "open"}`，可用 `opened`/`rejected` 字段区分。
+
 ## 4. 时间窗口与状态语义
 
 默认规则：
@@ -165,7 +184,7 @@ uv run pytest                 # 运行全部测试（日志打印输入/命中�
 | `POST /risk/score-batch` | 批量评分，返回 `scored` 与 `rejected` |
 | `POST /events` | 上报行为事件，返回 `accepted/deduped/late_dropped/alerts` |
 | `GET /alerts` | 已产生的全部告警 |
-| `POST /cases/{id}/open` | 以交易评分快照开案（自动关联同账户/设备告警） |
+| `POST /cases/{id}/open` | 以交易评分快照开案（自动关联同账户/设备告警）；交易无法评分时返回与评分入口一致的结构化拒绝，不开案、不改既有案件 |
 | `GET /cases/{id}` | 案件详情：快照、关联告警、处置历史（含版本） |
 | `POST /cases/{id}/dispose` | 处置流转（角色、目标状态、原因） |
 | `POST /cases/{id}/reopen` | 申诉重开终态案件（`senior_analyst`/`admin`，原因必填） |
@@ -187,12 +206,32 @@ curl -s -X POST localhost:8000/events -H 'Content-Type: application/json' -d '{
 ## 8. 本地验证方法
 
 ```bash
-uv run pytest                          # 全部 59 个用例
+uv run pytest                          # 全部 77 个用例
 uv run pytest tests/test_window.py     # 窗口：重复/乱序/迟到/边界/并发
 uv run pytest tests/test_realert.py    # 冷却与再告警、抖动不刷屏、内存有界
 uv run pytest tests/test_reopen.py     # 申诉重开：权限/幂等/并发/历史不变
 uv run pytest tests/test_persistence.py# 导出/导入：恢复一致性、版本与结构校验
+uv run pytest tests/test_reject_consistency.py  # 无法评分输入：各入口一致拒绝、无副作用、重复/并发稳定
 uv run pytest -k concurrent            # 仅并发场景
+```
+
+手动复现"无法评分输入在开案入口的结构化拒绝"：
+
+```bash
+uv run uvicorn main:app
+# 金额为负：开案入口返回与评分入口一致的拒绝（HTTP 200，不再 500）
+curl -s -X POST localhost:8000/cases/c1/open -H 'Content-Type: application/json' -d '{
+  "transaction_id":"t1","account_id":"a1","amount":-5,"currency":"USD",
+  "happened_at":"2026-09-23T03:00:00"}'
+# => {"case_id":"c1","opened":false,"rejected":true,"reject_reason":"invalid_amount","detail":"金额必须为正数且有限: -5.0"}
+
+# 对照评分入口：reject_reason 与 detail 逐字一致
+curl -s -X POST localhost:8000/risk/score -H 'Content-Type: application/json' -d '{
+  "transaction_id":"t1","account_id":"a1","amount":-5,"currency":"USD",
+  "happened_at":"2026-09-23T03:00:00"}'
+
+# 拒绝无副作用：案件未生成；重复提交结果不变
+curl -s localhost:8000/cases/c1        # => {"found": false}
 ```
 
 手动验证重启恢复（两条终端）：
@@ -219,6 +258,9 @@ curl -s -X POST localhost:8000/state/import -H 'Content-Type: application/json' 
 - 申诉重开：角色权限、终态校验、原因必填、重复/并发幂等且原因可区分、重开后快照与历史不变；
 - 持久化：导出/导入后去重与告警不重报、案件与快照可查、版本不匹配/结构不符/文件损坏均
   结构化拒绝且当前状态不变、HTTP 入口同样行为；
+- 统一拒绝：六类坏输入（负/零金额、缺金额、缺时间、币种非法、国家码非法）在评分/批量/开案
+  入口拒绝类别逐字一致，事件入口缺字段/非法时间同词汇表；拒绝后不建案、既有案件状态/快照/
+  历史不变；同一坏输入重复 6 次响应完全一致、16 路并发全部拒绝不建案、好坏混合并发互不干扰；
 - 端到端：告警关联开案 + 并发处置；评分/事件/案件混合并发一致性；
 - 每个用例通过日志打印 **输入 → 命中规则 → 判定依据/结论**（见 pytest 的 `INFO risk-tests` 输出）。
 

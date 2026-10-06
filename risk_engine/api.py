@@ -197,8 +197,22 @@ def create_app(engine: RiskEngine | None = None) -> FastAPI:
 
     @app.post("/cases/{case_id}/open")
     def open_case(case_id: str, payload: TransactionIn) -> dict[str, Any]:
-        case = engine.open_case_for_transaction(case_id, _to_transaction(payload))
-        return {"case_id": case.case_id, "status": case.status.value}
+        result = engine.open_case_for_transaction(case_id, _to_transaction(payload))
+        if isinstance(result, RejectResult):
+            # 与评分入口一致的结构化拒绝：不开案、不改任何案件状态
+            return {
+                "case_id": case_id,
+                "opened": False,
+                "rejected": True,
+                "reject_reason": result.reject_reason.value,
+                "detail": result.detail,
+            }
+        return {
+            "case_id": result.case_id,
+            "opened": True,
+            "rejected": False,
+            "status": result.status.value,
+        }
 
     @app.get("/cases/{case_id}")
     def get_case(case_id: str) -> dict[str, Any]:
