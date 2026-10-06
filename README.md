@@ -57,6 +57,14 @@ uv run pytest                 # 运行全部测试（日志打印输入/命中�
 
 批量评分逐笔隔离：单笔被拒绝或抛异常只产生一条 `rejected` 记录，不影响其余交易出分。
 
+**各入口拒绝行为一致**：同一笔给不出结论的交易，无论走 `POST /risk/score`、
+`POST /risk/score-batch` 还是 `POST /cases/{id}/open`，都返回 HTTP 200 + 结构化拒绝体，
+`reject_reason` 与 `detail` 逐字相同（开案入口额外带 `case_id` 与 `rejected: true`，
+**不会 500、不会建案、不影响任何已有案件**）；事件上报入口 `POST /events` 对缺字段/时间非法
+输入同样返回 200 + `reject_reason/reject_detail`（`missing_field` / `invalid_time`），
+不静默接收。被拒绝的请求不留后遗症：不凭空建案、不改已有案件状态/快照/历史、不产生告警；
+同一坏请求重复或并发提交，每次响应完全一致。
+
 ## 4. 时间窗口与状态语义
 
 默认规则：
@@ -165,7 +173,7 @@ uv run pytest                 # 运行全部测试（日志打印输入/命中�
 | `POST /risk/score-batch` | 批量评分，返回 `scored` 与 `rejected` |
 | `POST /events` | 上报行为事件，返回 `accepted/deduped/late_dropped/alerts` |
 | `GET /alerts` | 已产生的全部告警 |
-| `POST /cases/{id}/open` | 以交易评分快照开案（自动关联同账户/设备告警） |
+| `POST /cases/{id}/open` | 以交易评分快照开案（自动关联同账户/设备告警）；交易无法评分时返回 200 + 结构化拒绝，不建案 |
 | `GET /cases/{id}` | 案件详情：快照、关联告警、处置历史（含版本） |
 | `POST /cases/{id}/dispose` | 处置流转（角色、目标状态、原因） |
 | `POST /cases/{id}/reopen` | 申诉重开终态案件（`senior_analyst`/`admin`，原因必填） |
@@ -184,14 +192,49 @@ curl -s -X POST localhost:8000/events -H 'Content-Type: application/json' -d '{
   "event_type":"payment","occurred_at":"2026-09-23T10:00:00"}'
 ```
 
+### 无法给出结论的输入：各入口返回什么
+
+同一笔坏交易（以负金额为例）走三个交易入口，拒绝类别与说明完全一致，均为 HTTP 200：
+
+```bash
+BAD='{"transaction_id":"t1","account_id":"a1","amount":-1,"currency":"USD",
+     "device_id":"d1","happened_at":"2026-09-23T03:00:00"}'
+
+# 评分入口 -> {"transaction_id":"t1","rejected":true,"reject_reason":"invalid_amount","detail":"金额必须为正数且有限: -1.0"}
+curl -s -X POST localhost:8000/risk/score -H 'Content-Type: application/json' -d "$BAD"
+
+# 批量入口 -> {"scored":[],"rejected":[{"transaction_id":"t1","rejected":true,"reject_reason":"invalid_amount",...}]}
+curl -s -X POST localhost:8000/risk/score-batch -H 'Content-Type: application/json' \
+  -d "{\"transactions\":[$BAD]}"
+
+# 开案入口 -> {"case_id":"c1","rejected":true,"reject_reason":"invalid_amount","detail":"金额必须为正数且有限: -1.0"}
+# 随后 GET /cases/c1 返回 {"found": false}：没有凭空建案
+curl -s -X POST localhost:8000/cases/c1/open -H 'Content-Type: application/json' -d "$BAD"
+curl -s localhost:8000/cases/c1
+```
+
+事件上报入口对无法处理的输入同样返回 200 + 结构化拒绝（不 500、不静默接收）：
+
+```bash
+# device_id 为空 -> {"accepted":false,"reject_reason":"missing_field","reject_detail":"必填字段缺失或为空: device_id",...}
+curl -s -X POST localhost:8000/events -H 'Content-Type: application/json' -d '{
+  "event_id":"e-bad","account_id":"a1","device_id":"",
+  "event_type":"login","occurred_at":"2026-09-23T10:00:00"}'
+```
+
+**怎么区分拒绝原因**：看响应里的 `reject_reason` 字段——`missing_field`（必填字段缺失）、
+`invalid_amount`（金额非法）、`invalid_time`（时间非法）、`unscorable`（格式导致无法出分），
+人类可读的说明在 `detail` / `reject_detail`。四个入口的同一输入给出的类别与说明一致，可直接比对。
+
 ## 8. 本地验证方法
 
 ```bash
-uv run pytest                          # 全部 59 个用例
+uv run pytest                          # 全部 73 个用例
 uv run pytest tests/test_window.py     # 窗口：重复/乱序/迟到/边界/并发
 uv run pytest tests/test_realert.py    # 冷却与再告警、抖动不刷屏、内存有界
 uv run pytest tests/test_reopen.py     # 申诉重开：权限/幂等/并发/历史不变
 uv run pytest tests/test_persistence.py# 导出/导入：恢复一致性、版本与结构校验
+uv run pytest tests/test_reject_consistency.py  # 无法评分输入：各入口一致拒绝、无后遗症、重复/并发稳定
 uv run pytest -k concurrent            # 仅并发场景
 ```
 
@@ -219,6 +262,9 @@ curl -s -X POST localhost:8000/state/import -H 'Content-Type: application/json' 
 - 申诉重开：角色权限、终态校验、原因必填、重复/并发幂等且原因可区分、重开后快照与历史不变；
 - 持久化：导出/导入后去重与告警不重报、案件与快照可查、版本不匹配/结构不符/文件损坏均
   结构化拒绝且当前状态不变、HTTP 入口同样行为；
+- 无法评分输入：7 类坏交易在评分/批量/开案三入口拒绝类别与说明一致（含引擎层 invalid_time）、
+  事件入口缺字段/时间非法结构化拒绝、拒绝后不建案且已有案件与告警不变、
+  重复 6 次响应逐字一致、16 线程并发坏开案全部拒绝、好坏混合并发互不影响；
 - 端到端：告警关联开案 + 并发处置；评分/事件/案件混合并发一致性；
 - 每个用例通过日志打印 **输入 → 命中规则 → 判定依据/结论**（见 pytest 的 `INFO risk-tests` 输出）。
 

@@ -67,11 +67,15 @@ class RiskEngine:
     def active_alerts(self):
         return self._behavior.active_alerts()
 
-    def open_case_for_transaction(self, case_id: str, tx: Transaction) -> Case:
-        """对交易评分并以评分快照开案；被拒绝评分的交易不能开案。"""
+    def open_case_for_transaction(self, case_id: str, tx: Transaction) -> Case | RejectResult:
+        """对交易评分并以评分快照开案。
+
+        交易无法评分时返回与评分入口完全相同的 RejectResult（原因可区分），
+        不抛异常、不建案、不触碰任何既有案件状态。
+        """
         result = self.score(tx)
         if isinstance(result, RejectResult):
-            raise ValueError(f"交易无法评分，不能开案: {result.reject_reason.value}/{result.detail}")
+            return result
         related = [
             a
             for a in self._behavior.active_alerts()

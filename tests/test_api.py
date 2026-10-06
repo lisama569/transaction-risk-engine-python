@@ -117,12 +117,21 @@ def test_case_flow_permission_and_idempotency(client):
 
 def test_open_case_with_unscorable_tx_rejected(client):
     bad = dict(GOOD_TX, transaction_id="tbad", amount=-1.0)
-    # 经门面 open_case_for_transaction 会抛 ValueError -> FastAPI 返回 500，
-    # 而常规评分入口对该输入返回结构化拒绝原因（不静默通过）。
+    # 评分入口：结构化拒绝
     score_resp = client.post("/risk/score", json=bad).json()
     assert score_resp["rejected"] is True
     assert score_resp["reject_reason"] == "invalid_amount"
     log.info("非法交易评分拒绝: %s", score_resp)
+
+    # 开案入口：同样的输入得到同样的结构化拒绝（200，不再 500），且不建案
+    open_resp = client.post("/cases/c-bad/open", json=bad)
+    assert open_resp.status_code == 200
+    body = open_resp.json()
+    assert body["rejected"] is True
+    assert body["reject_reason"] == score_resp["reject_reason"]
+    assert body["detail"] == score_resp["detail"]
+    assert client.get("/cases/c-bad").json()["found"] is False
+    log.info("非法交易开案拒绝: %s", body)
 
 
 def test_case_not_found(client):
